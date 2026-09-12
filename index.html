@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ばあやん VTuber</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden;
+    background: #1b1b1f; font-family: "Hiragino Sans", "Yu Gothic", sans-serif;
+  }
+  #canvas-container { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  #camPreview {
+    position: fixed; right: 16px; bottom: 16px;
+    width: 180px; height: 135px;
+    border-radius: 10px; overflow: hidden;
+    border: 2px solid rgba(255,255,255,0.25);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    background: #000;
+    z-index: 20;
+  }
+  #camPreview video {
+    width: 100%; height: 100%; object-fit: cover;
+    transform: scaleX(-1); /* mirror, like a mirror */
+  }
+
+  #startOverlay {
+    position: fixed; inset: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(circle at center, #2a2a32, #131316);
+  }
+  #startOverlay .card {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 16px;
+    padding: 32px 40px;
+    text-align: center;
+    color: #f2f0ec;
+    max-width: 420px;
+  }
+  #startOverlay h1 { font-size: 20px; margin: 0 0 8px; }
+  #startOverlay p { font-size: 13px; line-height: 1.6; color: #c9c6c0; margin: 0 0 20px; }
+  #startBtn {
+    background: #e8a0a8; color: #2a1a1c; border: none;
+    padding: 12px 28px; font-size: 15px; border-radius: 999px;
+    cursor: pointer; font-weight: 600;
+  }
+  #startBtn:hover { background: #f0b3ba; }
+  #startBtn:disabled { opacity: 0.5; cursor: default; }
+  #startError { color: #ff9d9d; font-size: 12px; margin-top: 14px; display: none; }
+
+  #hud {
+    position: fixed; left: 16px; top: 16px; z-index: 20;
+    color: #eee; font-size: 12px; background: rgba(0,0,0,0.35);
+    padding: 8px 12px; border-radius: 8px; display: none;
+  }
+  #hud.visible { display: block; }
+  #hud .bar-row { display: flex; align-items: center; gap: 6px; margin: 2px 0; }
+  #hud .bar-label { width: 90px; opacity: 0.8; }
+  #hud .bar-track { width: 100px; height: 8px; background: rgba(255,255,255,0.12); border-radius: 4px; overflow: hidden; }
+  #hud .bar-fill { height: 100%; background: #e8a0a8; width: 0%; }
+
+  #toolbar {
+    position: fixed; left: 16px; bottom: 16px; z-index: 20;
+    display: flex; gap: 8px;
+  }
+  #toolbar button {
+    background: rgba(255,255,255,0.1); color: #eee; border: 1px solid rgba(255,255,255,0.2);
+    padding: 8px 14px; border-radius: 8px; font-size: 12px; cursor: pointer;
+  }
+  #toolbar button:hover { background: rgba(255,255,255,0.2); }
+  #framingHint {
+    align-self: center; color: #ccc; font-size: 11px;
+    background: rgba(0,0,0,0.3); padding: 6px 10px; border-radius: 6px;
+  }
+
+  #status {
+    position: fixed; top: 16px; right: 16px; z-index: 20;
+    color: #ccc; font-size: 11px; background: rgba(0,0,0,0.3);
+    padding: 6px 10px; border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+
+<div id="canvas-container"></div>
+
+<div id="camPreview">
+  <video id="webcamVideo" autoplay playsinline muted></video>
+</div>
+
+<div id="hud"></div>
+
+<div id="toolbar">
+  <button id="btnBust">バストアップ</button>
+  <button id="btnFull">全身</button>
+  <button id="btnDebug">デバッグ表示</button>
+  <span id="framingHint">ドラッグで回転・スクロールでズーム、顔の位置に合わせて調整してください</span>
+</div>
+
+<div id="status"></div>
+
+<div id="startOverlay">
+  <div class="card">
+    <h1>ばあやん VTuber</h1>
+    <p>ウェブカメラで表情を読み取って、3Dのばあやんに反映します。<br>カメラへのアクセスを許可してください。</p>
+    <button id="startBtn">カメラを起動する</button>
+    <div id="startError"></div>
+  </div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { MeshoptDecoder } from "three/addons/libs/meshopt_decoder.module.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { FaceLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+const statusEl = document.getElementById('status');
+function setStatus(msg) { statusEl.textContent = msg; }
+
+// ---------------------------------------------------------------
+// Three.js scene setup
+// ---------------------------------------------------------------
+const container = document.getElementById('canvas-container');
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xd9d5cc);
+
+const camera = new THREE.PerspectiveCamera(35, window.innerWidth / window.innerHeight, 0.01, 100);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+container.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.minDistance = 0.15;
+controls.maxDistance = 10;
+
+// lighting, roughly matching the Blender preview setup
+scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+const key = new THREE.DirectionalLight(0xffffff, 2.2);
+key.position.set(1, 1.6, 2); // in front of the character's face (+Z)
+scene.add(key);
+const fill = new THREE.DirectionalLight(0xffffff, 0.6);
+fill.position.set(-1.5, 0.6, 1);
+scene.add(fill);
+
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// ---------------------------------------------------------------
+// Load avatar
+// ---------------------------------------------------------------
+let avatarRoot = null;
+let morphMesh = null;         // mesh holding morphTargetDictionary / influences
+let headBone = null;          // CC_Base_Head bone, for head tracking
+let neckBone = null;          // CC_Base_NeckTwist01, shares a bit of the rotation
+let bustTarget = null, fullTarget = null;
+let bboxHeight = 1;
+
+const SHAPE_NAMES = ['Eye_Blink_L', 'Eye_Blink_R', 'Mouth_Open', 'Smile', 'Surprised', 'Angry', 'Sad'];
+
+function frameCamera(mode) {
+  if (!avatarRoot) return;
+  // Bound on the mesh only (not the whole avatarRoot hierarchy with bones).
+  // Note: this rig's skinned/rendered result doesn't line up with the raw
+  // geometry.boundingBox the same simple way it does in Blender -- the
+  // values below were calibrated empirically against actual renders rather
+  // than derived from the box fractions (which proved unreliable here).
+  const box = new THREE.Box3().setFromObject(morphMesh || avatarRoot);
+  const size = new THREE.Vector3(); box.getSize(size);
+  const center = new THREE.Vector3(); box.getCenter(center);
+  bboxHeight = size.y;
+
+  const targetY = mode === 'bust' ? 2.15 : 1.3;
+  const distance = mode === 'bust' ? 2.3 : 6.5;
+  const target = new THREE.Vector3(center.x, targetY, center.z);
+  camera.position.set(center.x, targetY, center.z + distance);
+  controls.target.copy(target);
+  controls.update();
+}
+
+const loader = new GLTFLoader();
+loader.setMeshoptDecoder(MeshoptDecoder);
+
+setStatus('3Dモデルを読み込み中...');
+const TARGET_HEIGHT = 1.4; // normalize to a sane real-world-ish scale (meters),
+                            // since the exported FBX->GLB pipeline leaves the
+                            // model at a tiny/inconsistent raw scale.
+loader.load('baayan_optimized.glb', (gltf) => {
+  avatarRoot = gltf.scene;
+  scene.add(avatarRoot);
+
+  avatarRoot.traverse((obj) => {
+    if (obj.isMesh && obj.morphTargetDictionary) {
+      morphMesh = obj;
+    }
+    if (obj.isBone) {
+      if (obj.name === 'CC_Base_Head') headBone = obj;
+      if (obj.name === 'CC_Base_NeckTwist01') neckBone = obj;
+    }
+  });
+
+  // normalize scale so downstream camera/lighting/clipping math works in
+  // sane human-scale units regardless of the source file's raw scale.
+  // Important: bound on the MESH only, not the whole avatarRoot hierarchy --
+  // Box3.setFromObject also includes bone (Object3D) world positions when
+  // walking the full scene graph, and this rig has bones positioned well
+  // outside the actual visible mesh, which corrupts the box badly.
+  const rawBox = new THREE.Box3().setFromObject(morphMesh || avatarRoot);
+  const rawSize = new THREE.Vector3(); rawBox.getSize(rawSize);
+  if (rawSize.y > 0) {
+    const scaleFactor = TARGET_HEIGHT / rawSize.y;
+    avatarRoot.scale.setScalar(scaleFactor);
+    avatarRoot.updateMatrixWorld(true);
+  }
+
+  if (headBone) {
+    headBone.userData.restQuat = headBone.quaternion.clone();
+  }
+  if (neckBone) {
+    neckBone.userData.restQuat = neckBone.quaternion.clone();
+  }
+
+  frameCamera('bust');
+  setStatus('モデル読み込み完了');
+}, (xhr) => {
+  if (xhr.lengthComputable) {
+    setStatus('読み込み中... ' + Math.round(xhr.loaded / xhr.total * 100) + '%');
+  }
+}, (err) => {
+  console.error(err);
+  setStatus('モデルの読み込みに失敗しました');
+});
+
+document.getElementById('btnBust').onclick = () => frameCamera('bust');
+document.getElementById('btnFull').onclick = () => frameCamera('full');
+
+// ---------------------------------------------------------------
+// Debug HUD
+// ---------------------------------------------------------------
+const hud = document.getElementById('hud');
+let hudVisible = false;
+const hudBars = {};
+for (const name of SHAPE_NAMES) {
+  const row = document.createElement('div');
+  row.className = 'bar-row';
+  row.innerHTML = `<div class="bar-label">${name}</div><div class="bar-track"><div class="bar-fill"></div></div>`;
+  hud.appendChild(row);
+  hudBars[name] = row.querySelector('.bar-fill');
+}
+document.getElementById('btnDebug').onclick = () => {
+  hudVisible = !hudVisible;
+  hud.classList.toggle('visible', hudVisible);
+};
+
+// ---------------------------------------------------------------
+// Blendshape -> shape key mapping
+// ---------------------------------------------------------------
+// MediaPipe's "Left"/"Right" refer to the subject's own anatomical left/right.
+// Our shape keys (Eye_Blink_L etc.) were sculpted the same way (the character's
+// own left/right), and the avatar faces the viewer just like the mirrored
+// camera preview does -- so these map straight across with no left/right flip.
+const GAIN = {
+  Eye_Blink_L: 1.0, Eye_Blink_R: 1.0, Mouth_Open: 1.0,
+  Smile: 1.3, Surprised: 1.4, Angry: 1.5, Sad: 1.5,
+};
+
+function computeTargets(blend) {
+  const g = (name) => blend[name] || 0;
+  const raw = {
+    Eye_Blink_L: g('eyeBlinkLeft'),
+    Eye_Blink_R: g('eyeBlinkRight'),
+    Mouth_Open: g('jawOpen'),
+    Smile: (g('mouthSmileLeft') + g('mouthSmileRight')) / 2,
+    Surprised: Math.max(g('browInnerUp'), (g('browOuterUpLeft') + g('browOuterUpRight')) / 2, (g('eyeWideLeft') + g('eyeWideRight')) / 2),
+    Angry: (g('browDownLeft') + g('browDownRight')) / 2,
+    Sad: Math.max((g('mouthFrownLeft') + g('mouthFrownRight')) / 2, g('browInnerUp') * 0.45),
+  };
+  const out = {};
+  for (const name of SHAPE_NAMES) {
+    out[name] = Math.min(1, raw[name] * GAIN[name]);
+  }
+  return out;
+}
+
+// exponential smoothing state
+const smoothed = {}; for (const n of SHAPE_NAMES) smoothed[n] = 0;
+const SMOOTH_UP = 0.55;   // how fast a value rises
+const SMOOTH_DOWN = 0.25; // how fast it falls (slower = less flicker)
+
+function applyMorphTargets(targets) {
+  if (!morphMesh) return;
+  for (const name of SHAPE_NAMES) {
+    const t = targets[name];
+    const cur = smoothed[name];
+    const rate = t > cur ? SMOOTH_UP : SMOOTH_DOWN;
+    smoothed[name] = cur + (t - cur) * rate;
+
+    const idx = morphMesh.morphTargetDictionary[name];
+    if (idx !== undefined) {
+      morphMesh.morphTargetInfluences[idx] = smoothed[name];
+    }
+    if (hudVisible && hudBars[name]) {
+      hudBars[name].style.width = Math.round(smoothed[name] * 100) + '%';
+    }
+  }
+}
+
+// ---------------------------------------------------------------
+// Head tracking from MediaPipe's facial transformation matrix
+// ---------------------------------------------------------------
+const headQuatTarget = new THREE.Quaternion();
+const headQuatSmoothed = new THREE.Quaternion();
+const HEAD_SMOOTH = 0.18;
+const HEAD_ROT_SCALE = 0.6; // damp the rotation so it doesn't look overdriven
+
+function applyHeadRotation(matrixData) {
+  if (!headBone || !matrixData) return;
+
+  const m = new THREE.Matrix4().fromArray(matrixData);
+  const q = new THREE.Quaternion().setFromRotationMatrix(m);
+  const e = new THREE.Euler().setFromQuaternion(q, 'YXZ');
+
+  // MediaPipe's face transform is in camera space (facing the camera).
+  // Mirror the yaw (left/right turn) since the avatar faces the viewer the
+  // same way the mirrored webcam preview does; keep pitch/roll as-is.
+  const yaw = -e.y * HEAD_ROT_SCALE;
+  const pitch = e.x * HEAD_ROT_SCALE;
+  const roll = -e.z * HEAD_ROT_SCALE;
+
+  headQuatTarget.setFromEuler(new THREE.Euler(pitch, yaw, roll, 'YXZ'));
+  headQuatSmoothed.slerp(headQuatTarget, HEAD_SMOOTH);
+
+  const rest = headBone.userData.restQuat;
+  if (rest) {
+    headBone.quaternion.copy(rest).multiply(headQuatSmoothed);
+  }
+  if (neckBone && neckBone.userData.restQuat) {
+    const neckQuat = new THREE.Quaternion().slerp(headQuatSmoothed, 0.35);
+    const halfQuat = new THREE.Quaternion().identity().slerp(headQuatSmoothed, 0.35);
+    neckBone.quaternion.copy(neckBone.userData.restQuat).multiply(halfQuat);
+  }
+}
+
+// ---------------------------------------------------------------
+// Webcam + MediaPipe FaceLandmarker
+// ---------------------------------------------------------------
+const video = document.getElementById('webcamVideo');
+const startOverlay = document.getElementById('startOverlay');
+const startBtn = document.getElementById('startBtn');
+const startError = document.getElementById('startError');
+
+let faceLandmarker = null;
+let lastVideoTime = -1;
+
+async function initFaceLandmarker() {
+  setStatus('顔認識モデルを準備中...');
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm"
+  );
+  faceLandmarker = await FaceLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+      delegate: "GPU"
+    },
+    outputFaceBlendshapes: true,
+    outputFacialTransformationMatrixes: true,
+    runningMode: "VIDEO",
+    numFaces: 1
+  });
+  setStatus('準備完了');
+}
+
+async function startCamera() {
+  startBtn.disabled = true;
+  startError.style.display = 'none';
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: 640, height: 480, facingMode: 'user' },
+      audio: false
+    });
+    video.srcObject = stream;
+    await video.play();
+  } catch (err) {
+    console.error(err);
+    startError.textContent = 'カメラを起動できませんでした: ' + err.message;
+    startError.style.display = 'block';
+    startBtn.disabled = false;
+    return;
+  }
+  try {
+    await initFaceLandmarker();
+  } catch (err) {
+    console.error(err);
+    startError.textContent = '顔認識モデルの読み込みに失敗しました(インターネット接続を確認してください): ' + err.message;
+    startError.style.display = 'block';
+    startBtn.disabled = false;
+    return;
+  }
+  startOverlay.style.display = 'none';
+  requestAnimationFrame(renderLoop);
+}
+startBtn.addEventListener('click', startCamera);
+
+function renderLoop() {
+  requestAnimationFrame(renderLoop);
+
+  if (faceLandmarker && video.readyState >= 2 && video.currentTime !== lastVideoTime) {
+    lastVideoTime = video.currentTime;
+    const result = faceLandmarker.detectForVideo(video, performance.now());
+
+    if (result.faceBlendshapes && result.faceBlendshapes.length > 0) {
+      const blend = {};
+      for (const cat of result.faceBlendshapes[0].categories) {
+        blend[cat.categoryName] = cat.score;
+      }
+      applyMorphTargets(computeTargets(blend));
+    }
+    if (result.facialTransformationMatrixes && result.facialTransformationMatrixes.length > 0) {
+      applyHeadRotation(result.facialTransformationMatrixes[0].data);
+    }
+  }
+
+  controls.update();
+  renderer.render(scene, camera);
+}
+</script>
+</body>
+</html>
