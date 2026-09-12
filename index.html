@@ -147,6 +147,7 @@ container.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+window.__debug = { THREE, scene, camera, renderer, controls };
 controls.dampingFactor = 0.08;
 controls.minDistance = 0.15;
 controls.maxDistance = 10;
@@ -242,6 +243,9 @@ loader.load('baayan_optimized.glb', (gltf) => {
 
   frameCamera('bust');
   setStatus('モデル読み込み完了');
+  window.__debug.avatarRoot = avatarRoot;
+  window.__debug.morphMesh = morphMesh;
+  window.__debug.headBone = headBone;
 }, (xhr) => {
   if (xhr.lengthComputable) {
     setStatus('読み込み中... ' + Math.round(xhr.loaded / xhr.total * 100) + '%');
